@@ -1,0 +1,50 @@
+## --- .NET & Visual Studio Build Artifacts ---
+[Bb]in/
+[Oo]bj/
+[Ll]og/
+[Ll]ogs/
+*.exe
+*.dll
+*.pdb
+*.runtimeconfig.json
+*.deps.json
+
+## --- Visual Studio & IDE Caches ---
+.vs/
+.vscode/
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+.idea/
+
+## --- PrintMark Project Specifics ---
+# Spool captures and queue directory
+SpoolQueue/
+*.spl
+*.prn
+*.bin
+*raw.bin
+
+# Local SQLite databases & journals
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+printmark_audit.db
+
+# Test PDFs generated during local runs
+sample_input.pdf
+stamped_output.pdf
+
+## --- Environment & Secrets Configuration ---
+# Keep default appsettings.json, ignore environment-specific overrides with credentials
+appsettings.*.json
+!appsettings.json
+
+## --- OS Specific Files ---
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+.DS_Store

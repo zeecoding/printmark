@@ -1,0 +1,40 @@
+﻿
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 17
+VisualStudioVersion = 17.0.31903.59
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "PrintMark.Core", "PrintMark.Core\PrintMark.Core.csproj", "{5233D432-0BB6-4649-BAD0-F9E686C966C9}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "PrintMark.Verify", "PrintMark.Verify\PrintMark.Verify.csproj", "{12A8831D-80F6-46FF-A16F-31B430DEB319}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "PrintMark.Data", "PrintMark.Data\PrintMark.Data.csproj", "{06795BA2-AFD2-4CCD-9CD9-FE3751FD5271}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "PrintMark.Service", "PrintMark.Service\PrintMark.Service.csproj", "{4761B24B-57D1-44C7-8521-B1A225EAA9EB}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|Any CPU = Debug|Any CPU
+		Release|Any CPU = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(SolutionProperties) = preSolution
+		HideSolutionNode = FALSE
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{5233D432-0BB6-4649-BAD0-F9E686C966C9}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{5233D432-0BB6-4649-BAD0-F9E686C966C9}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{5233D432-0BB6-4649-BAD0-F9E686C966C9}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{5233D432-0BB6-4649-BAD0-F9E686C966C9}.Release|Any CPU.Build.0 = Release|Any CPU
+		{12A8831D-80F6-46FF-A16F-31B430DEB319}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{12A8831D-80F6-46FF-A16F-31B430DEB319}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{12A8831D-80F6-46FF-A16F-31B430DEB319}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{12A8831D-80F6-46FF-A16F-31B430DEB319}.Release|Any CPU.Build.0 = Release|Any CPU
+		{06795BA2-AFD2-4CCD-9CD9-FE3751FD5271}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{06795BA2-AFD2-4CCD-9CD9-FE3751FD5271}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{06795BA2-AFD2-4CCD-9CD9-FE3751FD5271}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{06795BA2-AFD2-4CCD-9CD9-FE3751FD5271}.Release|Any CPU.Build.0 = Release|Any CPU
+		{4761B24B-57D1-44C7-8521-B1A225EAA9EB}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{4761B24B-57D1-44C7-8521-B1A225EAA9EB}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{4761B24B-57D1-44C7-8521-B1A225EAA9EB}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{4761B24B-57D1-44C7-8521-B1A225EAA9EB}.Release|Any CPU.Build.0 = Release|Any CPU
+	EndGlobalSection
+EndGlobal
