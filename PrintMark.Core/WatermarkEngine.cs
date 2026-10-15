@@ -1,7 +1,6 @@
 using System;
 using System.IO;
 using System.Security.Cryptography;
-using System.Text;
 using PdfSharpCore.Drawing;
 using PdfSharpCore.Pdf;
 using PdfSharpCore.Pdf.IO;
@@ -12,15 +11,14 @@ namespace PrintMark.Core;
 
 public static class WatermarkEngine
 {
-    private static readonly byte[] HmacSecretKey = Encoding.UTF8.GetBytes("LAB_PRINTMARK_SIGNING_SECRET_2026");
-
-    public static void ApplyWatermark(string sourcePath, string targetPath, StampMetadata meta, string? dbPath = null)
+    public static (string ShortCode, string HmacTag, int PageCount) ApplyWatermark(
+        string sourcePath,
+        string targetPath,
+        StampMetadata meta,
+        string? dbPath = null)
     {
-        // 1. Calculate HMAC-SHA256 signature
-        string canonical = $"{meta.KeyId}:{meta.JobId}:{meta.UserName}:{meta.ComputerName}:{meta.Timestamp.ToUnixTimeSeconds()}";
-        using var hmac = new HMACSHA256(HmacSecretKey);
-        string hmacTag = Convert.ToHexString(hmac.ComputeHash(Encoding.UTF8.GetBytes(canonical)))[..16];
-        string shortCode = $"{meta.KeyId}-{meta.JobId:X}-{meta.Timestamp.ToUnixTimeSeconds():X}-{hmacTag}";
+        // 1. Calculate HMAC-SHA256 signature via StampCodes
+        var (hmacTag, shortCode) = StampCodes.Create(meta);
 
         // 2. Open input PDF in modify mode
         using var document = PdfReader.Open(sourcePath, PdfDocumentOpenMode.Modify);
@@ -82,17 +80,14 @@ public static class WatermarkEngine
             );
         }
 
+        int pageCount = document.PageCount;
         document.Save(targetPath);
 
-        // Optional database logging
         if (!string.IsNullOrEmpty(dbPath))
         {
             using var sha256 = SHA256.Create();
-            byte[] fileHashBytes;
-            using (var fs = File.OpenRead(targetPath))
-            {
-                fileHashBytes = sha256.ComputeHash(fs);
-            }
+            using var fs = File.OpenRead(targetPath);
+            byte[] fileHashBytes = sha256.ComputeHash(fs);
 
             var db = new AuditDatabase(dbPath);
             db.LogPrintJob(new PrintAuditRecord
@@ -105,9 +100,11 @@ public static class WatermarkEngine
                 ShortCode = shortCode,
                 HmacTag = hmacTag,
                 DocumentSha256 = Convert.ToHexString(fileHashBytes),
-                PageCount = document.PageCount
+                PageCount = pageCount
             });
         }
+
+        return (shortCode, hmacTag, pageCount);
     }
 
     private static byte[] GenerateQrPng(string payload)

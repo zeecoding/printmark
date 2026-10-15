@@ -1,5 +1,8 @@
+using System.Diagnostics;
 using System.Net;
 using System.Net.Sockets;
+using System.Security.Cryptography;
+using System.Text;
 using PrintMark.Core;
 using PrintMark.Data;
 
@@ -8,14 +11,15 @@ namespace PrintMark.Service;
 public class SpoolCaptureWorker : BackgroundService
 {
     private readonly ILogger<SpoolCaptureWorker> _logger;
+    private readonly IConfiguration _config;
     private readonly string _spoolDir;
     private readonly AuditDatabase _database;
     private TcpListener? _listener;
-    private const int ListenPort = 9101;
 
-    public SpoolCaptureWorker(ILogger<SpoolCaptureWorker> logger)
+    public SpoolCaptureWorker(ILogger<SpoolCaptureWorker> logger, IConfiguration config)
     {
         _logger = logger;
+        _config = config;
         _spoolDir = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "SpoolQueue");
         Directory.CreateDirectory(_spoolDir);
         _database = new AuditDatabase(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "printmark_audit.db"));
@@ -23,9 +27,10 @@ public class SpoolCaptureWorker : BackgroundService
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        _listener = new TcpListener(IPAddress.Loopback, ListenPort);
+        int listenPort = _config.GetValue<int>("PrintMark:ListenPort", 9101);
+        _listener = new TcpListener(IPAddress.Any, listenPort);
         _listener.Start();
-        _logger.LogInformation("PrintMark Spool Capture Listener active on 127.0.0.1:{Port}", ListenPort);
+        _logger.LogInformation("PrintMark Spool Capture Listener active on 0.0.0.0:{Port}", listenPort);
 
         while (!stoppingToken.IsCancellationRequested)
         {
@@ -47,18 +52,21 @@ public class SpoolCaptureWorker : BackgroundService
 
     private async Task ProcessIncomingJobAsync(TcpClient client, CancellationToken ct)
     {
-        string jobId = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds().ToString();
-        string rawJobPath = Path.Combine(_spoolDir, $"job_{jobId}_raw.bin");
-        string stampedJobPath = Path.Combine(_spoolDir, $"job_{jobId}_stamped.pdf");
+        string fileToken = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds().ToString();
+        string rawJobPath = Path.Combine(_spoolDir, $"job_{fileToken}_raw.bin");
+        string inputPdfPath = Path.Combine(_spoolDir, $"job_{fileToken}_input.pdf");
+        string stampedJobPath = Path.Combine(_spoolDir, $"job_{fileToken}_stamped.pdf");
 
-        // 1. Extract physical network endpoint IP
-        string clientIp = "127.0.0.1";
+        string frontQueueName = _config.GetValue<string>("PrintMark:FrontQueueName") ?? "Canon-Protected";
+        string backQueueName = _config.GetValue<string>("PrintMark:BackQueueName") ?? "MF4500 Series";
+
+        string socketIp = "127.0.0.1";
         if (client.Client.RemoteEndPoint is IPEndPoint remoteEndPoint)
         {
-            clientIp = remoteEndPoint.Address.ToString();
+            socketIp = remoteEndPoint.Address.ToString();
         }
 
-        _logger.LogInformation("Capturing print job {JobId} incoming from IP: {ClientIp}", jobId, clientIp);
+        SpoolJobInfo spoolJob;
 
         try
         {
@@ -66,43 +74,56 @@ public class SpoolCaptureWorker : BackgroundService
             await using (var networkStream = client.GetStream())
             await using (var fileStream = File.Create(rawJobPath))
             {
+                // CRITICAL: Query Windows Spooler BEFORE closing the TCP connection so the job is still active!
+                spoolJob = IdentityResolver.ResolveActiveSpoolJob(frontQueueName);
+                _logger.LogInformation(
+                    "Capturing Spooler Job #{JobId} ('{Doc}') from User={User}, Host={Host}",
+                    spoolJob.JobId, spoolJob.DocumentName, spoolJob.UserName, spoolJob.ComputerName);
+
                 await networkStream.CopyToAsync(fileStream, ct);
             }
 
-            _logger.LogInformation("Raw job {JobId} saved ({Size} bytes). Resolving identities...", jobId, new FileInfo(rawJobPath).Length);
+            long rawSize = new FileInfo(rawJobPath).Length;
+            if (rawSize == 0)
+            {
+                _logger.LogWarning("Captured 0-byte stream for Job #{JobId}; skipping.", spoolJob.JobId);
+                return;
+            }
 
-            string userName = Environment.UserName;
-            string computerName = Environment.MachineName;
+            // 1. Resolve Real Client LAN IP, MAC Address, AD User SID, and AD Machine SID
+            var identity = IdentityResolver.ResolveContext(socketIp, spoolJob.UserName, spoolJob.ComputerName);
+            _logger.LogInformation(
+                "Resolved Client Identity: IP={Ip}, MAC={Mac}, UserSID={UserSid}, MachineSID={MachineSid}",
+                identity.ClientIp, identity.ClientMac, identity.UserSid, identity.MachineSid);
 
-            // 2. Resolve MAC Address + AD User SID + AD Machine SID
-            var identity = IdentityResolver.ResolveContext(clientIp, userName, computerName);
-            _logger.LogInformation("Resolved identity: UserSID={UserSid}, MachineSID={MachineSid}, MAC={Mac}", 
-                identity.UserSid, identity.MachineSid, identity.ClientMac);
+            // 2. Ensure we have a valid PDF for WatermarkEngine (convert PostScript -> PDF if needed)
+            if (IsFilePdf(rawJobPath))
+            {
+                File.Copy(rawJobPath, inputPdfPath, overwrite: true);
+            }
+            else
+            {
+                _logger.LogInformation("Converting captured PostScript stream to PDF via Ghostscript...");
+                ConvertPostScriptToPdf(rawJobPath, inputPdfPath);
+            }
 
+            // 3. Stamp PDF with WatermarkEngine
             var metadata = new StampMetadata(
-                JobId: (int)(DateTimeOffset.UtcNow.ToUnixTimeSeconds() % 100000),
-                UserName: userName,
-                ComputerName: computerName,
+                JobId: spoolJob.JobId,
+                UserName: spoolJob.UserName,
+                ComputerName: spoolJob.ComputerName,
                 Timestamp: DateTimeOffset.UtcNow
             );
 
-            // 3. Stamp document
-            string dbPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "printmark_audit.db");
-            WatermarkEngine.ApplyWatermark(rawJobPath, stampedJobPath, metadata);
+            var (shortCode, hmacTag, pageCount) = WatermarkEngine.ApplyWatermark(inputPdfPath, stampedJobPath, metadata);
 
-            // 4. Compute file SHA256 and store forensic log in database
-            using var sha256 = System.Security.Cryptography.SHA256.Create();
+            // 4. Compute SHA-256 of stamped PDF and log full forensic record to SQLite
+            using var sha256 = SHA256.Create();
             byte[] fileHashBytes;
             using (var fs = File.OpenRead(stampedJobPath))
             {
                 fileHashBytes = sha256.ComputeHash(fs);
             }
-
-            // Recompute short-code tag for audit tracking
-            string canonical = $"{metadata.KeyId}:{metadata.JobId}:{metadata.UserName}:{metadata.ComputerName}:{metadata.Timestamp.ToUnixTimeSeconds()}";
-            using var hmac = new System.Security.Cryptography.HMACSHA256(System.Text.Encoding.UTF8.GetBytes("LAB_PRINTMARK_SIGNING_SECRET_2026"));
-            string hmacTag = Convert.ToHexString(hmac.ComputeHash(System.Text.Encoding.UTF8.GetBytes(canonical)))[..16];
-            string shortCode = $"{metadata.KeyId}-{metadata.JobId:X}-{metadata.Timestamp.ToUnixTimeSeconds():X}-{hmacTag}";
 
             _database.LogPrintJob(new PrintAuditRecord
             {
@@ -121,14 +142,92 @@ public class SpoolCaptureWorker : BackgroundService
                 ShortCode = shortCode,
                 HmacTag = hmacTag,
                 DocumentSha256 = Convert.ToHexString(fileHashBytes),
-                PageCount = 1
+                PageCount = pageCount
             });
 
-            _logger.LogInformation("[✓] Job {JobId} successfully stamped and audited.", jobId);
+            _logger.LogInformation("[✓] Stamped & audited Job #{JobId} ({Pages} pages, Code={Code}). Forwarding to '{BackQueue}'...",
+                metadata.JobId, pageCount, shortCode, backQueueName);
+
+            // 5. Forward Stamped PDF to the physical Canon printer queue (MF4500 Series)
+            PrintPdfToWindowsQueue(stampedJobPath, backQueueName);
+
+            _logger.LogInformation("[✓] Job #{JobId} dispatched to physical printer '{BackQueue}'.", metadata.JobId, backQueueName);
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Failed to process print job {JobId}", jobId);
+            _logger.LogError(ex, "Failed to process print job {Token}", fileToken);
+        }
+    }
+
+    private static bool IsFilePdf(string filePath)
+    {
+        byte[] buffer = new byte[1024];
+        using var fs = File.OpenRead(filePath);
+        int read = fs.Read(buffer, 0, buffer.Length);
+        string header = Encoding.ASCII.GetString(buffer, 0, read);
+        return header.Contains("%PDF-", StringComparison.Ordinal);
+    }
+
+    private string ResolveGhostscriptExecutable()
+    {
+        string? configured = _config.GetValue<string>("PrintMark:GhostscriptPath");
+        if (!string.IsNullOrWhiteSpace(configured) && File.Exists(configured))
+        {
+            return configured;
+        }
+
+        string programFiles = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles);
+        string gsRoot = Path.Combine(programFiles, "gs");
+        if (Directory.Exists(gsRoot))
+        {
+            var exe = Directory.GetFiles(gsRoot, "gswin64c.exe", SearchOption.AllDirectories).FirstOrDefault();
+            if (exe != null) return exe;
+        }
+
+        return "gswin64c.exe"; // Assumes in system PATH
+    }
+
+    private void ConvertPostScriptToPdf(string psFilePath, string outputPdfPath)
+    {
+        string gsExe = ResolveGhostscriptExecutable();
+        var psi = new ProcessStartInfo
+        {
+            FileName = gsExe,
+            Arguments = $"-dBATCH -dNOPAUSE -dSAFER -sDEVICE=pdfwrite -sOutputFile=\"{outputPdfPath}\" \"{psFilePath}\"",
+            CreateNoWindow = true,
+            UseShellExecute = false,
+            RedirectStandardError = true
+        };
+
+        using var proc = Process.Start(psi) ?? throw new InvalidOperationException("Failed to start Ghostscript.");
+        string stdErr = proc.StandardError.ReadToEnd();
+        proc.WaitForExit(30000);
+
+        if (!File.Exists(outputPdfPath) || new FileInfo(outputPdfPath).Length == 0)
+        {
+            throw new InvalidOperationException($"Ghostscript failed to convert spool file to PDF. ExitCode={proc.ExitCode}, Error={stdErr}");
+        }
+    }
+
+    private void PrintPdfToWindowsQueue(string pdfFilePath, string backQueueName)
+    {
+        string gsExe = ResolveGhostscriptExecutable();
+        var psi = new ProcessStartInfo
+        {
+            FileName = gsExe,
+            Arguments = $"-dBATCH -dNOPAUSE -dNOSAFER -dPrinted -sDEVICE=mswinpr2 -sOutputFile=\"%printer%{backQueueName}\" \"{pdfFilePath}\"",
+            CreateNoWindow = true,
+            UseShellExecute = false,
+            RedirectStandardError = true
+        };
+
+        using var proc = Process.Start(psi) ?? throw new InvalidOperationException("Failed to start Ghostscript for physical printing.");
+        string stdErr = proc.StandardError.ReadToEnd();
+        proc.WaitForExit(60000);
+
+        if (proc.ExitCode != 0)
+        {
+            throw new InvalidOperationException($"Ghostscript failed printing to '{backQueueName}'. ExitCode={proc.ExitCode}, Error={stdErr}");
         }
     }
 

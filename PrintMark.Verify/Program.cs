@@ -1,116 +1,76 @@
 ﻿using System;
+using System.IO;
 using System.Security.Cryptography;
 using System.Text;
+using PrintMark.Data;
 
 namespace PrintMark.Verify;
 
 public class Program
 {
-    // Secret signing key matching PrintMark.Core
     private static readonly byte[] HmacSecretKey = Encoding.UTF8.GetBytes("LAB_PRINTMARK_SIGNING_SECRET_2026");
 
     public static void Main(string[] args)
     {
-        Console.WriteLine("==================================================");
-        Console.WriteLine("       PrintMark Document Authenticity Verifier   ");
-        Console.WriteLine("==================================================\n");
+        Console.WriteLine("=== PrintMark Forensic Audit Verifier ===");
 
-        string input = args.Length > 0 ? args[0] : "";
-        if (string.IsNullOrWhiteSpace(input))
+        string dbPath = args.Length > 0
+            ? args[0]
+            : Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "printmark_audit.db");
+
+        if (!File.Exists(dbPath))
         {
-            Console.Write("Enter QR Payload or Audit Short-Code: ");
-            input = Console.ReadLine()?.Trim() ?? string.Empty;
+            // Fallback to local working directory if running via dotnet run
+            dbPath = "printmark_audit.db";
         }
 
-        VerifyAuditCode(input);
-    }
+        Console.Write("Enter printed ShortCode (e.g., k1-412-670E1A2B-A1B2C3D4E5F60718): ");
+        string? shortCode = Console.ReadLine()?.Trim();
 
-    public static void VerifyAuditCode(string rawInput)
-    {
-        try
+        if (string.IsNullOrWhiteSpace(shortCode))
         {
-            string shortCode;
-            string userName = "UNKNOWN";
-            string computerName = "UNKNOWN";
-
-            // Format 1: Scanned QR string (V1|ShortCode|User|Host)
-            if (rawInput.StartsWith("V1|"))
-            {
-                var parts = rawInput.Split('|');
-                if (parts.Length < 4)
-                {
-                    Console.WriteLine("[✗] Malformed QR payload structure.");
-                    return;
-                }
-                shortCode = parts[1];
-                userName = parts[2];
-                computerName = parts[3];
-            }
-            // Format 2: Direct Audit Short-Code from footer
-            else
-            {
-                shortCode = rawInput;
-            }
-
-            // Parse: KeyId-JobHex-TimeHex-HmacTag
-            var tokens = shortCode.Split('-');
-            if (tokens.Length != 4)
-            {
-                Console.WriteLine("[✗] Invalid short-code structure. Expected format: KeyId-JobHex-TimeHex-HmacTag.");
-                return;
-            }
-
-            string keyId = tokens[0];
-            int jobId = Convert.ToInt32(tokens[1], 16);
-            long unixSeconds = Convert.ToInt64(tokens[2], 16);
-            string presentedHmac = tokens[3];
-
-            DateTimeOffset timestamp = DateTimeOffset.FromUnixTimeSeconds(unixSeconds);
-
-            // Re-derive canonical payload
-            string canonical = $"{keyId}:{jobId}:{userName}:{computerName}:{unixSeconds}";
-            using var hmac = new HMACSHA256(HmacSecretKey);
-            string expectedHmac = Convert.ToHexString(hmac.ComputeHash(Encoding.UTF8.GetBytes(canonical)))[..16];
-
-            // Constant-time comparison to prevent timing attacks
-            bool isValid = CryptographicOperations.FixedTimeEquals(
-                Encoding.UTF8.GetBytes(presentedHmac),
-                Encoding.UTF8.GetBytes(expectedHmac)
-            );
-
-            Console.WriteLine("---------------- Database Audit Record ----------------");
-            Console.WriteLine($"Database ID      : #{record.Id}");
-            Console.WriteLine($"Job ID           : {record.JobId}");
-            Console.WriteLine($"User Account     : {record.UserName}");
-            Console.WriteLine($"Workstation Host : {record.ComputerName}");
-            Console.WriteLine($"Client IP        : {record.ClientIp}");
-            Console.WriteLine($"Client MAC       : {record.ClientMac}");
-            Console.WriteLine($"User AD SID      : {record.UserSid}");
-            Console.WriteLine($"User AD GUID     : {record.UserGuid}");
-            Console.WriteLine($"Machine AD SID   : {record.MachineSid}");
-            Console.WriteLine($"Machine AD GUID  : {record.MachineGuid}");
-            Console.WriteLine($"Auth Protocol    : {record.AuthType}");
-            Console.WriteLine($"Print Timestamp  : {record.Timestamp:yyyy-MM-dd HH:mm:ss} UTC");
-            Console.WriteLine($"Document SHA256  : {record.DocumentSha256}");
-            Console.WriteLine($"Stored HMAC Tag  : {record.HmacTag}");
-            Console.WriteLine("-------------------------------------------------------");
-
-            if (isValid)
-            {
-                Console.ForegroundColor = ConsoleColor.Green;
-                Console.WriteLine("[✓] AUTHENTIC: Document cryptographic signature verified.");
-                Console.ResetColor();
-            }
-            else
-            {
-                Console.ForegroundColor = ConsoleColor.Red;
-                Console.WriteLine("[✗] TAMPER DETECTED: Invalid signature. Document may be forged.");
-                Console.ResetColor();
-            }
+            Console.WriteLine("[!] ShortCode cannot be empty.");
+            return;
         }
-        catch (Exception ex)
+
+        var db = new AuditDatabase(dbPath);
+        PrintAuditRecord? record = db.FindByShortCode(shortCode);
+
+        if (record == null)
         {
-            Console.WriteLine($"[!] Error: {ex.Message}");
+            Console.WriteLine($"[✗] No audit record found in '{dbPath}' for ShortCode: {shortCode}");
+            return;
         }
+
+        // Recompute HMAC-SHA256 to verify cryptographic integrity
+        long unixTime = record.Timestamp.ToUnixTimeSeconds();
+        string canonical = $"{record.KeyId}:{record.JobId}:{record.UserName}:{record.ComputerName}:{unixTime}";
+        using var hmac = new HMACSHA256(HmacSecretKey);
+        string expectedTag = Convert.ToHexString(hmac.ComputeHash(Encoding.UTF8.GetBytes(canonical)))[..16];
+
+        bool isSignatureValid = string.Equals(expectedTag, record.HmacTag, StringComparison.OrdinalIgnoreCase);
+
+        Console.WriteLine();
+        Console.WriteLine(isSignatureValid
+            ? "[✓] CRYPTOGRAPHIC SIGNATURE VERIFIED (Authentic PrintMark Record)"
+            : "[!] WARNING: SIGNATURE MISMATCH (Record may have been tampered with!)");
+        Console.WriteLine("------------------------------------------------------------");
+        Console.WriteLine($"Audit ID       : {record.Id}");
+        Console.WriteLine($"Job ID         : {record.JobId}");
+        Console.WriteLine($"Short Code     : {record.ShortCode}");
+        Console.WriteLine($"HMAC Tag       : {record.HmacTag} (Expected: {expectedTag})");
+        Console.WriteLine($"Timestamp (UTC): {record.Timestamp:yyyy-MM-dd HH:mm:ss} UTC");
+        Console.WriteLine($"User Name      : {record.UserName}");
+        Console.WriteLine($"User SID       : {record.UserSid}");
+        Console.WriteLine($"User GUID      : {record.UserGuid}");
+        Console.WriteLine($"Computer Name  : {record.ComputerName}");
+        Console.WriteLine($"Machine SID    : {record.MachineSid}");
+        Console.WriteLine($"Machine GUID   : {record.MachineGuid}");
+        Console.WriteLine($"Client IP      : {record.ClientIp}");
+        Console.WriteLine($"Client MAC     : {record.ClientMac}");
+        Console.WriteLine($"Auth Type      : {record.AuthType}");
+        Console.WriteLine($"Page Count     : {record.PageCount}");
+        Console.WriteLine($"PDF SHA-256    : {record.DocumentSha256}");
+        Console.WriteLine("------------------------------------------------------------");
     }
 }
